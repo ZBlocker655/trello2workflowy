@@ -7,10 +7,10 @@ The script will save output into "data/learn_chinese.json".
 Here is sample JSON output from one of the Evernote documents:
 {
     "hanzi": "诲".
+    "date_created": "2017-01-01T00:00:00.000Z",
     "lines": ['raw line 1', 'raw line 2', ...], // these are pre-parsed lines from the Evernote document, included for debugging purposes
     "pinyin": ["hui4"],
     "meaning": ["teach"],
-    "date_created": "2017-01-01T00:00:00.000Z",
     "composition": [
         { hanzi: "讠", meaning: "words" },
         { hanzi: "每", meaning: "every" }
@@ -29,7 +29,7 @@ This field is used for a couple different purposes.
 First, when a hanzi has multiple different pinyin, and the pinyins have different sounds, we 
 will break up the single Evernote doc into multiple hanzi entries in the JSON output. Typically, one
 entry will have a modifier "western" to signify that the mnemonic story takes place in an old West setting.
-Typically, the other entry will have a "sci-fi" modifier to signify that the mnemonic story takes place in a sci-fi setting.
+Typically, the other entry will have a "sci_fi" modifier to signify that the mnemonic story takes place in a sci-fi setting.
 Sometimes there is a third entry with the modifier "police_drama" to signify that the mnemonic story takes place in a 
 police drama setting.
 A special case: when the hanzi has multiple pinyin where the syllable is the same but the tones differ, we
@@ -98,17 +98,43 @@ parser.parseString(evernoteData, async function (err, result) {
     console.log('Number of hanzi without errors: ' + output.hanzi.length);
 
     fs.writeFileSync(path.join(__dirname, 'data', 'learn_chinese.json'), JSON.stringify(output, null, 2));
-    fs.writeFileSync(path.join(__dirname, 'data', 'learn_chinese_errors.json'), JSON.stringify(outputErrors, null, 2));
+    writeOutputErrors(outputErrors);
 });
+
+function writeOutputErrors(outputErrors) {
+    // Before writing output errors to file, group them by error message.
+    // This is because we want to see how many errors there are for each error message.
+    var groupedErrors = _.groupBy(outputErrors.hanzi, function (entry) {
+        return entry.could_not_load_reason;
+    });
+
+    fs.writeFileSync(path.join(__dirname, 'data', 'learn_chinese_errors.json'), JSON.stringify(groupedErrors, null, 2));
+}
 
 async function parseHanzi(note) {
     let hanzi = {};
+    let parseContext = { nextLine: 0 };
 
     try {
         hanzi = addTitle(hanzi, note);
+        hanzi = parseDateCreated(hanzi, note);
         hanzi = parseContent(hanzi, note);
-        // Add more steps here...
-        return [hanzi];
+        hanzi = skipTitleInContext(hanzi, parseContext);
+        hanzi = parsePinyinAndMeaning(hanzi, parseContext);
+        hanzi = parseNoteAndComposition(hanzi, parseContext);
+
+        // Last phase: try to figure out which story structure we have.
+        hanzi = await parseMnemonic(hanzi, parseContext);
+
+        // After this last step we have to check if we now have an array or an object.
+        // If we have an array, we return that as-is. Otherwise, package the single hanzi
+        // into an array and return that.
+        if (hanzi.length) {
+            return hanzi;
+        }
+        else {
+            return [hanzi];
+        }
     } catch (err) {
         //console.log(err);
         hanzi.could_not_load_reason = err.message;
@@ -121,6 +147,11 @@ function addTitle(hanzi, note) {
     if (title.length !== 1) {
         throw new Error('title is not a single hanzi');
     }
+    return hanzi;
+}
+
+function parseDateCreated(hanzi, note) {
+    var dateCreated = hanzi.date_created = note.created[0];
     return hanzi;
 }
 
@@ -230,6 +261,61 @@ function parseContentLines(contentXml) {
     return lines;
 }
 
+function htmlToText(html) {
+    var text = '';
+    var parser = new htmlparser2.Parser({
+        ontext: function (textPart) {
+            text += textPart;
+        }
+    });
+    parser.write(html);
+    parser.end();
+    text = text.replace(/\n/g, ' ');
+    text = text.replace(/\t/g, ' ');
+    text = text.replace(/\r/g, ' ');
+    text = text.replace(/\u00A0/g, ' ');
+    text = text.trim();
+
+    return text;
+}
+
+function skipTitleInContext(hanzi, parseContext) {
+    // The first line in the content may be a simple repeat of the title, which we want to skip.
+    var firstLine = hanzi.lines[parseContext.nextLine];
+    var firstLineText = htmlToText(firstLine);
+    if (firstLineText === hanzi.title) {
+        parseContext.nextLine++;
+    }
+
+    return hanzi;
+}
+
+function parsePinyinAndMeaning(hanzi, parseContext) {
+    // The next line in the content should be the pinyin.
+    // If parsePinyin() or parseMeaning() returns null, this is an error condition.
+    var pinyin = hanzi.pinyin = parsePinyin(hanzi.lines[parseContext.nextLine]);
+    if (!pinyin) {
+        throw new Error('Could not parse pinyin');
+    }
+    parseContext.nextLine++;
+
+    // If the next line is the composition, it means we skip over meaning for now.
+    var composition = parseComposition(hanzi.lines[parseContext.nextLine]).composition;
+    if (composition) {
+        return hanzi;
+    }
+
+    // The next line in the content should be the meaning.
+    var multiplePinyin = pinyin && pinyin.length > 1;
+    var meaning = hanzi.meaning = parseMeaning(hanzi.lines[parseContext.nextLine], multiplePinyin);
+    if (!meaning) {
+        throw new Error('Could not parse meaning');
+    }
+    parseContext.nextLine++;
+
+    return hanzi;
+}
+
 function parsePinyin(pinyin) {
     // The pinyin line will be one or more pinyin syllables separated by comma and maybe a space.
     // For each pinyin syllable, we want to normalize it in the following fashion:
@@ -239,17 +325,275 @@ function parsePinyin(pinyin) {
     var syllables = pinyin.split(',');
     var normalized = [];
     for (const syllable of syllables) {
-        var normalizedSyllable = pinyinFormat(syllable, PinyinStyle.TONE2);
-        if (!normalizedSyllable) {
-            return null;
+        try
+        {
+            var normalizedSyllable = pinyinFormat(syllable.trim(), PinyinStyle.TONE2);
+            if (!normalizedSyllable) {
+                return null;
+            }
+            normalized.push(normalizedSyllable);
         }
-        normalized.push(normalizedSyllable);
+        catch (err) {
+            console.log("pinyinFormat error: " + err.message);
+            throw err;
+        }
     }
     return normalized;
 }
 
-function parseMeaning(meaning) {
+function parseMeaning(meaning, expectMultiple) {
+    if (!expectMultiple) {
+        return [htmlToText(meaning)];
+    }
+
     // The meaning line will be one or more meanings separated by comma and maybe a space.
     var meanings = meaning.split(',');
     return meanings;
+}
+
+function parseNoteAndComposition(hanzi, parseContext) {
+    // The next line in the content might be the note, but mostly there is no note.
+    // The note has no expected format, so the only way to detect it is to 
+    // first scan for the composition which does have an expected format, and if there
+    // is a line of context _before_ it, that must be the note.
+    // ONE FINAL NOTE: _ONLY_ if there is a composition do we record the note. If no composition, no note.
+    var note = null;
+    var composition = parseComposition(hanzi.lines[parseContext.nextLine]);
+    if (composition.composition) {
+        parseContext.nextLine++;
+    }
+    else if (hanzi.lines.length > parseContext.nextLine + 1) {
+        // No composition on this line. Therefore this line might be the note, if the next line is the composition.
+        // If the next line is not the composition, then there is no note and no composition.
+        composition = parseComposition(hanzi.lines[parseContext.nextLine + 1]);
+        if (composition.composition) {
+            note = hanzi.lines[parseContext.nextLine];
+            parseContext.nextLine += 2;
+        }
+    }
+    if (composition) {
+        if (!hanzi.meaning) hanzi.meaning = [htmlToText(composition.meaning)];
+        hanzi.composition = composition.composition;
+    }
+    if (note) {
+        hanzi.note = note;
+    }
+
+    return hanzi;
+}
+
+function parseComposition(compositionText) {
+    // FORMAT of composition (use regex to detect):
+    //    ELEMENT + ELEMENT (... + ELEMENT....) [= MEANING]?
+    // FORMAT of ELEMENT
+    //    MEANING (HANZI)?  - the hanzi is optional but should be captured if it's there.
+    // If there is no composition, it's not an error condition, just set composition to null.
+
+    // First, detect if there is a composition.
+    var compositionSegment = compositionText;
+    var meaning = null;
+
+    var compositionRegex = /(.*)\s*=\s*(.*)/;
+    var compositionMatch = compositionText.match(compositionRegex);
+    if (compositionMatch) {
+        compositionSegment = compositionMatch[1];
+        meaning = compositionMatch[2];
+    }
+
+    // Now, parse the composition.
+    var compositionElements = compositionSegment.split('+');
+    if (compositionElements.length < 2) return {};
+    var composition = [];
+    for (const element of compositionElements) {
+        var compositionElement = parseCompositionElement(element.trim());
+        if (!compositionElement) {
+            return {};
+        }
+        composition.push(compositionElement);
+    }
+
+    return {
+        composition: composition,
+        meaning: meaning
+    };
+}
+
+function parseCompositionElement(element) {
+    // FORMAT of ELEMENT
+    //    MEANING (HANZI)?  - the hanzi is optional but should be captured if it's there.
+    // You may discard the meaning, which we've already parsed.
+    // If there is no composition, it's not an error condition, just set composition to null.
+    var elementRegex = /^(.*?)(\s+.)?$/;
+    var elementMatch = element.match(elementRegex);
+    if (!elementMatch) {
+        return null;
+    }
+
+    var elementMeaning = elementMatch[1];
+    var elementHanzi = elementMatch[2];
+    var compositionElement = {
+        meaning: elementMeaning.trim()
+    };
+    if (elementHanzi) {
+        compositionElement.hanzi = elementHanzi.trim();
+    }
+
+    return compositionElement;
+}
+
+function parseMnemonic(hanzi, parseContext) {
+    var result;
+
+    result = tryParseHanziWithMultipleHeterophonicPinyin(hanzi, parseContext);
+    if (result) return result;
+
+    result = tryParseHanziWithMultipleHomophonicPinyin(hanzi, parseContext);
+    if (result) return result;
+
+    return parseSingleHanzi(hanzi, parseContext);
+}
+
+function tryParseHanziWithMultipleHeterophonicPinyin(hanzi, parseContext) {
+    if (hanzi.pinyin.length < 2) return null;   
+    if (hanzi.pinyin.length !== hanzi.meaning.length) return null;
+
+    var expectedGenreMarkers = ['old west', 'sci-fi', 'police drama'];
+    var genreCodes = ['western', 'sci_fi', 'police_drama'];
+
+    var resultHanzi = [];
+
+    // for each pinyin, we expect to find a mnemonic story of the expected genre for that index.
+    for (var i = 0; i < hanzi.pinyin.length; i++) {
+        var pinyin = hanzi.pinyin[i];
+        var meaning = hanzi.meaning[i];
+        var genreMarker = expectedGenreMarkers[i];
+        var genreCode = genreCodes[i];
+
+        var hanziEntry = parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genreMarker);
+        if (!hanziEntry) return null;
+
+        resultHanzi.push(hanziEntry);
+    }
+}
+
+function parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genreMarker) {
+    // Expect the next line of content to exist and to contain the genre marker. Else return null.
+    if (parseContext.nextLine >= hanzi.lines.length) return null;
+    var meaningLine = hanzi.lines[parseContext.nextLine];
+    if (meaningLine.indexOf(genreMarker) === -1) return null;
+    parseContext.nextLine++;
+    
+    if (parseContext.nextLine >= hanzi.lines.length) return null;
+    var pronounciationLine = hanzi.lines[parseContext.nextLine];
+    if (!isPronounciationLine(pronounciationLine)) return null;
+    parseContext.nextLine++;
+    
+    var hanziEntry = _.cloneDeep(hanzi);
+    hanziEntry.meaning = [meaning];
+    hanziEntry.pinyin = [pinyin];
+    hanziEntry.mnemonic_genre = genreCode;
+    hanziEntry.mnemonic = [
+        { type: 'meaning', html: meaningLine },
+        { type: 'sound', html: pronounciationLine }
+    ];
+    return hanziEntry;
+}
+
+function tryParseHanziWithMultipleHomophonicPinyin(hanzi, parseContext) {
+    // This works differently from the heterophonic case. Whereas in the heterophonic case
+    // we split the original hanzi into multiple records, each with a different genre, in 
+    // this case we keep it as one hanzi with multiple pinyin and a mnemonic story that 
+    // takes place on a movie set.
+    // How to determine if this case applies:
+    //  - The hanzi has multiple pinyin.
+    //  - When you strip the tone away from the pinyin (e.g. "hui4" -> "hui"), all the pinyin are the same.
+    //  - The first line of the content (NON-CASE-SENSITIVE) contains the phrase "movie set".
+    if (hanzi.pinyin.length < 2) return null;
+    if (hanzi.pinyin.length !== hanzi.meaning.length) return null;
+    var pinyinWithoutTone = hanzi.pinyin[0].replace(/[0-9]/g, '');
+    for (var i = 1; i < hanzi.pinyin.length; i++) {
+        var pinyinWithoutTone2 = hanzi.pinyin[i].replace(/[0-9]/g, '');
+        if (pinyinWithoutTone !== pinyinWithoutTone2) return null;
+    }
+
+    // Expect the next line of content to exist and to contain the genre marker. Else return null.
+    if (parseContext.nextLine >= hanzi.lines.length) return null;
+    var firstMeaningLine = hanzi.lines[parseContext.nextLine];
+    if (firstMeaningLine.toLowerCase().indexOf('movie set') === -1) return null;
+    parseContext.nextLine++;
+
+    hanziEntry.mnemonic_genre = 'movie_set';
+    hanziEntry.mnemonic = [
+        { type: 'meaning', html: firstMeaningLine }
+    ];
+
+    // Now parse the remainder of the lines - there could be any number of meaning or pronounciation lines.
+    // Loop through all subsequent lines - for each one determine if it's meaning or sound, and just add it
+    // to hanziEntry.mnemonic.
+    while (parseContext.nextLine < hanzi.lines.length) {
+        var line = hanzi.lines[parseContext.nextLine];
+        if (isPronounciationLine(line)) {
+            hanziEntry.mnemonic.push({ type: 'sound', html: line });
+        }
+        else {
+            hanziEntry.mnemonic.push({ type: 'meaning', html: line });
+        }
+        parseContext.nextLine++;
+    }
+
+    return hanziEntry;
+}
+
+function parseSingleHanzi(hanzi, parseContext) {
+    // In this final case, we expect the following:
+    //  - The hanzi has only one pinyin.
+    //  - The hanzi has only one meaning.
+    //  - The next line of content is the meaning.
+    //  - The next line of content is the pronounciation.
+    //  - There are no more lines of content after this.
+    // If any of these conditions fail, throw an error with a context-specific message (do not return null).
+    if (hanzi.pinyin.length !== 1) {
+        throw new Error('Expected only one pinyin for single pinyin case');
+    }
+    if (hanzi.meaning.length !== 1) {
+        throw new Error('Expected only one meaning for single pinyin case');
+    }
+    if (parseContext.nextLine >= hanzi.lines.length) {
+        throw new Error('Expected meaning line for single pinyin case');
+    }
+    var meaningLine = hanzi.lines[parseContext.nextLine];
+    parseContext.nextLine++;
+    if (parseContext.nextLine >= hanzi.lines.length) {
+        throw new Error('Expected pronounciation line for single pinyin case');
+    }
+    var pronounciationLine = hanzi.lines[parseContext.nextLine];
+    if (!isPronounciationLine(pronounciationLine)) {
+        throw new Error('Expected pronounciation line was not a valid pronounciation line for single pinyin case');
+    }
+    parseContext.nextLine++;
+    // Expect no more lines.
+    if (parseContext.nextLine < hanzi.lines.length) {
+        throw new Error('Expected no more lines of content for single pinyin case');
+    }
+
+    hanzi.mnemonic_genre = null;
+    hanzi.mnemonic = [
+        { type: 'meaning', html: meaningLine },
+        { type: 'sound', html: pronounciationLine }
+    ];
+
+    return hanzi;
+}
+
+function isPronounciationLine(line) {
+    // The pronounciation line is expected to be the part of the 
+    // mnemonic story that indicates how a hanzi is pronounced.
+    var testLine = line.toLowerCase();
+    var pronounciationMarkers = ['giant', 'fairy', 'fairies', 'teddy', 'teddies', 'dwarf', 'dwarves', 'robot'];
+    for (const marker of pronounciationMarkers) {
+        if (testLine.indexOf(marker) !== -1) {
+            return true;
+        }
+    }
+    return false;
 }
