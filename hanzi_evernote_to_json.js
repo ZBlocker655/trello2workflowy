@@ -118,6 +118,8 @@ async function parseHanzi(note) {
     try {
         hanzi = addTitle(hanzi, note);
         hanzi = parseDateCreated(hanzi, note);
+        hanzi = disqualifyTaggedAsRadical(hanzi, note);
+        hanzi = disqualifyNotesWithImages(hanzi, note);
         hanzi = parseContent(hanzi, note);
         hanzi = skipTitleInContext(hanzi, parseContext);
         hanzi = parsePinyinAndMeaning(hanzi, parseContext);
@@ -140,6 +142,23 @@ async function parseHanzi(note) {
         hanzi.could_not_load_reason = err.message;
         return [hanzi];
     }
+}
+
+function disqualifyTaggedAsRadical(hanzi, note) {
+    // If the note is tagged as a radical, we cannot parse it.
+    // We will throw an error to indicate this.
+    if (note.tag && note.tag.indexOf('radical') !== -1) {
+        throw new Error('Note is tagged as a radical');
+    }
+    return hanzi;
+}
+
+function disqualifyNotesWithImages(hanzi, note) {
+    // If the note contains an image, we cannot parse it.
+    if (note.resource) {
+        throw new Error('Note contains an image');
+    }
+    return hanzi;
 }
 
 function addTitle(hanzi, note) {
@@ -213,9 +232,9 @@ function parseContentLines(contentXml) {
             // Replace U+00A0 (non-breaking space) with a regular space.
             text = text.replace(/\u00A0/g, ' ');
             
-            // Special case: if the text contains " / ", we consider " / " to be a line divider.
+            // Special case: if the text contains " /", we consider it to be a line divider.
             // This is because my personal format was to separate semantic sections using that divider.
-            var dividerIndex = text.indexOf(" / ");
+            var dividerIndex = text.indexOf(" /");
             if (dividerIndex !== -1) {
                 var left = text.substring(0, dividerIndex);
                 var right = text.substring(dividerIndex + 3);
@@ -254,7 +273,7 @@ function parseContentLines(contentXml) {
 
     // Filter out any lines that are empty or only whitespace.
     lines = _.filter(lines, function (line) {
-        return line.trim().length > 0;
+        return htmlToText(line).trim().length > 0;
     });
 
     if (lines.length > 0) lines[lines.length - 1] = lines[lines.length - 1].trim();
@@ -322,20 +341,27 @@ function parsePinyin(pinyin) {
     //   Where we have a vowel with an accent mark, we need to convert it to a simple ASCII representation of the tone
     //   For example, "hé" should be converted to "he2".
     // The function ultimately returns an array of normalized pinyin syllables.
+    if (!pinyin) return null;
     var syllables = pinyin.split(',');
     var normalized = [];
+    const nopronunciationMemo = '(no pronunciation)';
     for (const syllable of syllables) {
-        try
-        {
-            var normalizedSyllable = pinyinFormat(syllable.trim(), PinyinStyle.TONE2);
-            if (!normalizedSyllable) {
-                return null;
-            }
-            normalized.push(normalizedSyllable);
+        if (htmlToText(syllable).trim().toLowerCase() === nopronunciationMemo) {
+            normalized.push(nopronunciationMemo);
         }
-        catch (err) {
-            console.log("pinyinFormat error: " + err.message);
-            throw err;
+        else {
+            try
+            {
+                var normalizedSyllable = pinyinFormat(syllable.trim(), PinyinStyle.TONE2);
+                if (!normalizedSyllable) {
+                    return null;
+                }
+                normalized.push(normalizedSyllable);
+            }
+            catch (err) {
+                console.log("pinyinFormat error: " + err.message);
+                throw err;
+            }
         }
     }
     return normalized;
@@ -346,8 +372,12 @@ function parseMeaning(meaning, expectMultiple) {
         return [htmlToText(meaning)];
     }
 
-    // The meaning line will be one or more meanings separated by comma and maybe a space.
-    var meanings = meaning.split(',');
+    // The meaning line will be one or more meanings separated by comma and maybe a space. Trim each meaning.
+    var meanings = [];
+    var meaningSegments = meaning.split(',');
+    for (const segment of meaningSegments) {
+        meanings.push(htmlToText(segment.trim()));
+    }
     return meanings;
 }
 
@@ -369,6 +399,11 @@ function parseNoteAndComposition(hanzi, parseContext) {
         if (composition.composition) {
             note = hanzi.lines[parseContext.nextLine];
             parseContext.nextLine += 2;
+        }
+        // One more case to try: a note exists but no composition. So just check if line (non-case-sensitive) contains "note:"
+        else if (hanzi.lines[parseContext.nextLine].toLowerCase().indexOf('note:') !== -1) {
+            note = hanzi.lines[parseContext.nextLine];
+            parseContext.nextLine++;
         }
     }
     if (composition) {
@@ -396,8 +431,8 @@ function parseComposition(compositionText) {
     var compositionRegex = /(.*)\s*=\s*(.*)/;
     var compositionMatch = compositionText.match(compositionRegex);
     if (compositionMatch) {
-        compositionSegment = compositionMatch[1];
-        meaning = compositionMatch[2];
+        compositionSegment = compositionMatch[1].trim();
+        meaning = compositionMatch[2].trim();
     }
 
     // Now, parse the composition.
@@ -469,23 +504,25 @@ function tryParseHanziWithMultipleHeterophonicPinyin(hanzi, parseContext) {
         var genreMarker = expectedGenreMarkers[i];
         var genreCode = genreCodes[i];
 
-        var hanziEntry = parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genreMarker);
+        var hanziEntry = parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genreMarker, genreCode);
         if (!hanziEntry) return null;
 
         resultHanzi.push(hanziEntry);
     }
+
+    return resultHanzi;
 }
 
-function parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genreMarker) {
+function parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genreMarker, genreCode) {
     // Expect the next line of content to exist and to contain the genre marker. Else return null.
     if (parseContext.nextLine >= hanzi.lines.length) return null;
     var meaningLine = hanzi.lines[parseContext.nextLine];
-    if (meaningLine.indexOf(genreMarker) === -1) return null;
+    if (meaningLine.toLowerCase().indexOf(genreMarker) === -1) return null;
     parseContext.nextLine++;
     
     if (parseContext.nextLine >= hanzi.lines.length) return null;
-    var pronounciationLine = hanzi.lines[parseContext.nextLine];
-    if (!isPronounciationLine(pronounciationLine)) return null;
+    var pronunciationLine = hanzi.lines[parseContext.nextLine];
+    if (!isPronunciationLine(pronunciationLine)) return null;
     parseContext.nextLine++;
     
     var hanziEntry = _.cloneDeep(hanzi);
@@ -494,7 +531,7 @@ function parseHanziWithOneGenreStory(hanzi, parseContext, meaning, pinyin, genre
     hanziEntry.mnemonic_genre = genreCode;
     hanziEntry.mnemonic = [
         { type: 'meaning', html: meaningLine },
-        { type: 'sound', html: pronounciationLine }
+        { type: 'sound', html: pronunciationLine }
     ];
     return hanziEntry;
 }
@@ -522,26 +559,26 @@ function tryParseHanziWithMultipleHomophonicPinyin(hanzi, parseContext) {
     if (firstMeaningLine.toLowerCase().indexOf('movie set') === -1) return null;
     parseContext.nextLine++;
 
-    hanziEntry.mnemonic_genre = 'movie_set';
-    hanziEntry.mnemonic = [
+    hanzi.mnemonic_genre = 'movie_set';
+    hanzi.mnemonic = [
         { type: 'meaning', html: firstMeaningLine }
     ];
 
-    // Now parse the remainder of the lines - there could be any number of meaning or pronounciation lines.
+    // Now parse the remainder of the lines - there could be any number of meaning or pronunciation lines.
     // Loop through all subsequent lines - for each one determine if it's meaning or sound, and just add it
     // to hanziEntry.mnemonic.
     while (parseContext.nextLine < hanzi.lines.length) {
         var line = hanzi.lines[parseContext.nextLine];
-        if (isPronounciationLine(line)) {
-            hanziEntry.mnemonic.push({ type: 'sound', html: line });
+        if (isPronunciationLine(line)) {
+            hanzi.mnemonic.push({ type: 'sound', html: line });
         }
         else {
-            hanziEntry.mnemonic.push({ type: 'meaning', html: line });
+            hanzi.mnemonic.push({ type: 'meaning', html: line });
         }
         parseContext.nextLine++;
     }
 
-    return hanziEntry;
+    return hanzi;
 }
 
 function parseSingleHanzi(hanzi, parseContext) {
@@ -549,7 +586,7 @@ function parseSingleHanzi(hanzi, parseContext) {
     //  - The hanzi has only one pinyin.
     //  - The hanzi has only one meaning.
     //  - The next line of content is the meaning.
-    //  - The next line of content is the pronounciation.
+    //  - The next line of content is the pronunciation.
     //  - There are no more lines of content after this.
     // If any of these conditions fail, throw an error with a context-specific message (do not return null).
     if (hanzi.pinyin.length !== 1) {
@@ -564,11 +601,11 @@ function parseSingleHanzi(hanzi, parseContext) {
     var meaningLine = hanzi.lines[parseContext.nextLine];
     parseContext.nextLine++;
     if (parseContext.nextLine >= hanzi.lines.length) {
-        throw new Error('Expected pronounciation line for single pinyin case');
+        throw new Error('Expected pronunciation line for single pinyin case');
     }
-    var pronounciationLine = hanzi.lines[parseContext.nextLine];
-    if (!isPronounciationLine(pronounciationLine)) {
-        throw new Error('Expected pronounciation line was not a valid pronounciation line for single pinyin case');
+    var pronunciationLine = hanzi.lines[parseContext.nextLine];
+    if (!isPronunciationLine(pronunciationLine)) {
+        throw new Error('Expected pronunciation line was not a valid pronunciation line for single pinyin case');
     }
     parseContext.nextLine++;
     // Expect no more lines.
@@ -579,18 +616,18 @@ function parseSingleHanzi(hanzi, parseContext) {
     hanzi.mnemonic_genre = null;
     hanzi.mnemonic = [
         { type: 'meaning', html: meaningLine },
-        { type: 'sound', html: pronounciationLine }
+        { type: 'sound', html: pronunciationLine }
     ];
 
     return hanzi;
 }
 
-function isPronounciationLine(line) {
-    // The pronounciation line is expected to be the part of the 
+function isPronunciationLine(line) {
+    // The pronunciation line is expected to be the part of the 
     // mnemonic story that indicates how a hanzi is pronounced.
     var testLine = line.toLowerCase();
-    var pronounciationMarkers = ['giant', 'fairy', 'fairies', 'teddy', 'teddies', 'dwarf', 'dwarves', 'robot'];
-    for (const marker of pronounciationMarkers) {
+    var pronunciationMarkers = ['no pronunciation', 'giant', 'fairy', 'fairies', 'teddy', 'teddies', 'dwarf', 'dwarves', 'robot'];
+    for (const marker of pronunciationMarkers) {
         if (testLine.indexOf(marker) !== -1) {
             return true;
         }
