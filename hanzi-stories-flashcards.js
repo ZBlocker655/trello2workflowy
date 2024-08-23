@@ -18,7 +18,7 @@ const axiosRetry = require('axios-retry');
 axiosRetry(axios, { retryDelay: axiosRetry.exponentialDelay, retries: 20 });
 
 const parser = new xml2js.Parser();
-const data = fs.readFileSync(path.join(__dirname, 'data/hanzi-stories.opml'));
+const data = fs.readFileSync(path.join(__dirname, 'data/hanzi-stories.opml'), 'utf8');
 
 parser.parseString(data, (err, result) => {
     if (err) {
@@ -54,7 +54,7 @@ async function findHanziFlashcard(hanziChar) {
         const cardIds = findCardsResponse.data;
         
         if (cardIds.length === 0) {
-            console.log(`${hanziChar.path}: Hanzi char ${hanziChar.hanzi} not found in Anki.`);
+            console.log(`${hanziChar.path}: Hanzi char ${hanziChar.hanzi} (${hanziChar.definition}) not found in Anki.`);
         } else {
             const cardsInfoResponse = await axios.post('http://localhost:8765', {
                 action: 'cardsInfo',
@@ -70,7 +70,7 @@ async function findHanziFlashcard(hanziChar) {
                 }
             });
             if (!found) {
-                console.log(`${hanziChar.path}: Hanzi char ${hanziChar.hanzi} in Anki does not stand by itself.`);
+                console.log(`${hanziChar.path}: Hanzi char ${hanziChar.hanzi} (${hanziChar.definition}) in Anki does not stand by itself.`);
             }
         }
     } catch (error) {
@@ -105,8 +105,10 @@ function loadChildHanziChars(hanziElements, path) {
     var hanziChars = [];
     hanziElements.forEach(hanziElement => {
         // Get hanzi char, which is the part of the text before the colon.
-        var hanzi = hanziElement.$.text.split(':')[0];
-        hanziChars.push({hanzi: hanzi, path: path});
+        var hanziElementParts = hanziElement.$.text.split(':');
+        var hanzi = hanziElementParts[0];
+        var definition = hanziElementParts[1];
+        hanziChars.push({hanzi: hanzi, path: path, definition: definition});
     });
     
     //console.log(`Loaded ${hanziChars.length} hanzi chars from ${path}`);

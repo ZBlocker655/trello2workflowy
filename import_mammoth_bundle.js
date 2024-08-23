@@ -41,7 +41,7 @@ var opml = `<?xml version="1.0"?>
       `;
 
 courses.forEach(course => {
-    opml += `      <li><a href="${course.url}">${course.title}</a> | #📝 </li>
+    opml += `      <li><a href="${course.url}">${course.title}</a> | #👩‍🏫  </li>
 `;
 });
 
