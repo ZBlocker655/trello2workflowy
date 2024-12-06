@@ -3,7 +3,7 @@ In this story, we load the hanzi stories database of hanzi characters from hanzi
 Follow the exact rules for parsing and loading from hanzi-stories-audit.js. 
 
 For each parsed hanzi character we will search for it using AnkiConnect, which involves a POST request to the AnkiConnect API.
-The appropriate query text is "deck:中文 front:{{hanzi}}*". In the results, check the title of each card to see
+The appropriate query text is '"deck:中文 - Hanzi" front:{{hanzi}}*'. In the results, check the title of each card to see
 if that hanzi character stands by itself or is immediately followed by whitespace or a "[" character. If we do not find this 
 pattern, log a line about it to the console.
 */
@@ -13,6 +13,9 @@ const path = require('path');
 const xml2js = require('xml2js');
 const axios = require('axios');
 const axiosRetry = require('axios-retry');
+
+const AnkiConnectUrl = 'http://localhost:8765';
+const AnkiDeckName = '中文 - Hanzi';
 
 // configure axios exponential backoff
 axiosRetry(axios, { retryDelay: axiosRetry.exponentialDelay, retries: 20 });
@@ -45,10 +48,10 @@ async function findHanziFlashcards(hanziChars) {
 
 async function findHanziFlashcard(hanziChar) {
     try {
-        const findCardsResponse = await axios.post('http://localhost:8765', {
+        const findCardsResponse = await axios.post(AnkiConnectUrl, {
             action: 'findCards',
             params: {
-                query: `deck:中文 front:${hanziChar.hanzi}*`
+                query: `"deck:${AnkiDeckName}" front:${hanziChar.hanzi}*`
             }
         });
         const cardIds = findCardsResponse.data;
@@ -56,7 +59,7 @@ async function findHanziFlashcard(hanziChar) {
         if (cardIds.length === 0) {
             console.log(`${hanziChar.path}: Hanzi char ${hanziChar.hanzi} (${hanziChar.definition}) not found in Anki.`);
         } else {
-            const cardsInfoResponse = await axios.post('http://localhost:8765', {
+            const cardsInfoResponse = await axios.post(AnkiConnectUrl, {
                 action: 'cardsInfo',
                 params: {
                     cards: cardIds

@@ -42,6 +42,7 @@ parser.parseString(data, (err, result) => {
     // Root element is the outline under the body.
     const root = result.opml.body[0].outline[0];
     auditHanziStories(root);
+    console.log('Audit complete');
 });
 
 function auditHanziStories(pronunciations) {
